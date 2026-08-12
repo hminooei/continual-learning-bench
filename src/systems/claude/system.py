@@ -353,6 +353,11 @@ class ClaudeCodeSystem(ContinualLearningSystem):
             if self._vertex_region:
                 env["ANTHROPIC_VERTEX_LOCATION"] = self._vertex_region
                 env["CLOUD_ML_REGION"] = self._vertex_region
+            if self._model:
+                env["ANTHROPIC_MODEL"] = self._model
+                env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = self._model
+                env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = self._model
+            env["MAX_THINKING_TOKENS"] = "0"
         else:
             env["ANTHROPIC_API_KEY"] = self._api_key
 
@@ -564,7 +569,7 @@ class ClaudeCodeSystem(ContinualLearningSystem):
             "--model",
             self._model,
         ]
-        if self._reasoning_effort is not None:
+        if self._reasoning_effort is not None and not self._use_vertex:
             args.extend(["--effort", self._reasoning_effort])
         if resume_mode == "resume-sid":
             if self._conversation_id is None:
