@@ -86,9 +86,108 @@ class ProviderTurnResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def resolve_vertex_config(
+    project_id: str | None = None,
+    region: str | None = None,
+) -> tuple[str | None, str]:
+    """Resolve project_id and region for Vertex AI Anthropic calls.
+
+    Region defaults to 'global' if not specified in arguments or environment.
+    Project ID is resolved from explicit arguments, environment variables, or
+    Google Application Default Credentials (ADC).
+    """
+    resolved_region = (
+        region
+        or os.environ.get("ANTHROPIC_VERTEX_LOCATION")
+        or os.environ.get("CLOUD_ML_REGION")
+        or os.environ.get("VERTEXAI_LOCATION")
+        or os.environ.get("GOOGLE_CLOUD_REGION")
+        or os.environ.get("LOCATION")
+        or "global"
+    )
+
+    resolved_project = (
+        project_id
+        or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID")
+        or os.environ.get("CLOUD_ML_PROJECT_ID")
+        or os.environ.get("VERTEXAI_PROJECT")
+        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or os.environ.get("GCP_PROJECT")
+    )
+    if not resolved_project:
+        try:
+            import google.auth
+
+            _, default_project = google.auth.default()
+            if default_project:
+                resolved_project = default_project
+        except Exception:
+            pass
+
+    return resolved_project, resolved_region
+
+
+def is_vertex_available() -> bool:
+    """Check if Vertex AI Google Cloud authentication is available."""
+    if any(
+        os.environ.get(k)
+        for k in (
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "CLOUD_ML_PROJECT_ID",
+            "VERTEXAI_PROJECT",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        )
+    ):
+        return True
+    try:
+        import google.auth
+
+        creds, _ = google.auth.default()
+        return creds is not None
+    except Exception:
+        return False
+
+
+def resolve_anthropic_auth_provider(
+    model: str,
+    configured_provider: str = "auto",
+) -> Literal["direct", "vertex"]:
+    """Resolve whether an Anthropic model call should use Direct Anthropic API or Vertex AI."""
+    if configured_provider == "vertex":
+        return "vertex"
+    if configured_provider == "direct":
+        return "direct"
+
+    # In "auto" mode:
+    model_lower = model.lower()
+    if (
+        model_lower.startswith("vertex_ai/")
+        or model_lower.startswith("vertex/")
+        or model_lower.startswith("google/")
+        or os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1"
+        or os.environ.get("ANTHROPIC_AUTH_PROVIDER", "").lower() == "vertex"
+    ):
+        return "vertex"
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "direct"
+
+    # Fallback to Vertex AI if available
+    if is_vertex_available():
+        return "vertex"
+
+    return "direct"
+
+
 def detect_provider(model: str) -> ProviderName:
     model_lower = model.lower()
-    if "claude" in model_lower or model_lower.startswith("anthropic/"):
+    if (
+        "claude" in model_lower
+        or model_lower.startswith("anthropic/")
+        or model_lower.startswith("vertex_ai/claude")
+        or model_lower.startswith("vertex/claude")
+    ):
         return "anthropic"
     if "gemini" in model_lower or model_lower.startswith("google/"):
         return "gemini"
@@ -142,6 +241,10 @@ class ProviderTurnClient:
         openai_store: bool = True,
         openai_include_encrypted_reasoning: bool = False,
         anthropic_max_tokens: int | None = None,
+        anthropic_project_id: str | None = None,
+        anthropic_region: str | None = None,
+        anthropic_auth_provider: Literal["auto", "direct", "vertex"] = "auto",
+        anthropic_stream: bool = False,
         content_policy_max_retries: int = 5,
         content_policy_retry_delay: float = 2.0,
     ) -> None:
@@ -154,6 +257,10 @@ class ProviderTurnClient:
             model,
             anthropic_max_tokens,
         )
+        self.anthropic_project_id = anthropic_project_id
+        self.anthropic_region = anthropic_region
+        self.anthropic_auth_provider = anthropic_auth_provider
+        self.anthropic_stream = anthropic_stream
         self.content_policy_max_retries = max(0, int(content_policy_max_retries))
         self.content_policy_retry_delay = max(0.0, float(content_policy_retry_delay))
         self.state = make_provider_state(
@@ -466,9 +573,16 @@ class ProviderTurnClient:
                 }
             )
 
+    def _anthropic_model(self) -> str:
+        return (
+            self.model.removeprefix("anthropic/")
+            .removeprefix("vertex_ai/")
+            .removeprefix("vertex/")
+        )
+
     def _anthropic_payload(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "model": self.model.removeprefix("anthropic/"),
+            "model": self._anthropic_model(),
             "max_tokens": self.anthropic_max_tokens,
             "messages": messages,
         }
@@ -493,9 +607,99 @@ class ProviderTurnClient:
         return payload
 
     def _anthropic_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        auth_provider = resolve_anthropic_auth_provider(
+            self.model, self.anthropic_auth_provider
+        )
+        if auth_provider == "vertex":
+            return self._anthropic_vertex_request(payload)
+        return self._anthropic_direct_request(payload)
+
+    def _anthropic_vertex_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from anthropic import AnthropicVertex
+
+        project_id, region = resolve_vertex_config(
+            project_id=self.anthropic_project_id,
+            region=self.anthropic_region,
+        )
+
+        client = AnthropicVertex(region=region, project_id=project_id)
+        model_name = payload.get("model", self._anthropic_model())
+
+        kwargs: dict[str, Any] = {
+            "model": model_name,
+            "max_tokens": payload.get("max_tokens", self.anthropic_max_tokens),
+            "messages": payload["messages"],
+        }
+        if "system" in payload:
+            kwargs["system"] = payload["system"]
+
+        for attempt in range(_ANTHROPIC_MAX_RETRIES + 1):
+            try:
+                if self.anthropic_stream:
+                    with client.messages.stream(**kwargs) as stream:
+                        response_msg = stream.get_final_message()
+                        return response_msg.model_dump()
+                else:
+                    response_msg = client.messages.create(**kwargs)
+                    return response_msg.model_dump()
+            except Exception as exc:
+                status = extract_http_status(exc)
+                if (
+                    status is not None
+                    and status in _ANTHROPIC_RETRYABLE_HTTP_STATUSES
+                    and attempt < _ANTHROPIC_MAX_RETRIES
+                ):
+                    wait = _anthropic_retry_delay(exc, attempt)
+                    logger.warning(
+                        "Transient Anthropic Vertex HTTP %s; retrying in %.1fs "
+                        "(attempt %d/%d): %s",
+                        status,
+                        wait,
+                        attempt + 1,
+                        _ANTHROPIC_MAX_RETRIES + 1,
+                        str(exc)[:200],
+                    )
+                    time.sleep(wait)
+                    continue
+
+                if (
+                    isinstance(exc, (ConnectionError, OSError))
+                    and attempt < _ANTHROPIC_MAX_RETRIES
+                ):
+                    wait = _anthropic_retry_delay(exc, attempt)
+                    logger.warning(
+                        "Transient Anthropic Vertex network error; retrying in %.1fs "
+                        "(attempt %d/%d): %s",
+                        wait,
+                        attempt + 1,
+                        _ANTHROPIC_MAX_RETRIES + 1,
+                        str(exc)[:300],
+                    )
+                    time.sleep(wait)
+                    continue
+
+                refusal = as_provider_refusal(
+                    exc,
+                    provider="anthropic",
+                    model=self.model,
+                )
+                if refusal is not None:
+                    raise refusal from exc
+
+                if attempt >= _ANTHROPIC_MAX_RETRIES:
+                    raise RuntimeError(
+                        f"Anthropic Vertex request failed: {exc}"
+                    ) from exc
+                raise
+        raise RuntimeError("Anthropic Vertex retry loop exhausted unexpectedly")
+
+    def _anthropic_direct_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY must be set for native Anthropic ICL")
+            raise ValueError(
+                "ANTHROPIC_API_KEY must be set for direct Anthropic API, or configure Vertex AI "
+                "auth (e.g. gcloud auth application-default login, or set ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION)."
+            )
         body = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             "https://api.anthropic.com/v1/messages",
@@ -843,13 +1047,19 @@ def _resolve_model_max_output_tokens(
 ) -> int:
     if configured_max_output_tokens is not None:
         return configured_max_output_tokens
-    try:
-        info = litellm.get_model_info(model)
-        max_output_tokens = info.get("max_output_tokens")
-        if max_output_tokens:
-            return int(max_output_tokens)
-    except Exception:
-        pass
+    for candidate in (
+        model,
+        model.removeprefix("vertex_ai/")
+        .removeprefix("vertex/")
+        .removeprefix("anthropic/"),
+    ):
+        try:
+            info = litellm.get_model_info(candidate)
+            max_output_tokens = info.get("max_output_tokens")
+            if max_output_tokens:
+                return int(max_output_tokens)
+        except Exception:
+            pass
     # Anthropic requires max_tokens. Keep a conservative fallback for custom
     # model ids that LiteLLM cannot describe.
     return 4096

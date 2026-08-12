@@ -51,6 +51,10 @@ class ICLSystem(ContinualLearningSystem):
         openai_store: bool = True,
         openai_include_encrypted_reasoning: bool = False,
         anthropic_max_tokens: int | None = None,
+        anthropic_project_id: str | None = None,
+        anthropic_region: str | None = None,
+        anthropic_auth_provider: str = "auto",
+        anthropic_stream: bool = False,
     ):
         """
         Initialize ICL baseline system.
@@ -70,6 +74,10 @@ class ICLSystem(ContinualLearningSystem):
                 even when OpenAI server-side state is enabled.
             anthropic_max_tokens: Native Anthropic max_tokens response budget.
                 If omitted, uses the model's known max output token limit.
+            anthropic_project_id: Google Cloud project ID for Vertex AI Anthropic calls.
+            anthropic_region: Google Cloud region for Vertex AI Anthropic calls (default: "global").
+            anthropic_auth_provider: "auto" (default), "direct" (Anthropic API key), or "vertex" (Vertex AI).
+            anthropic_stream: If True, use streaming Anthropic SDK API.
         """
         self._name = name
         self.model = model
@@ -84,6 +92,10 @@ class ICLSystem(ContinualLearningSystem):
             openai_store=openai_store,
             openai_include_encrypted_reasoning=openai_include_encrypted_reasoning,
             anthropic_max_tokens=anthropic_max_tokens,
+            anthropic_project_id=anthropic_project_id,
+            anthropic_region=anthropic_region,
+            anthropic_auth_provider=anthropic_auth_provider,  # type: ignore[arg-type]
+            anthropic_stream=anthropic_stream,
         )
 
         # Context storage

@@ -61,20 +61,48 @@ def cmd_doctor(_args: list[str]) -> None:
         ):
             failures += 1
 
-    # ── API keys ─────────────────────────────────────────────────────────────
-    print("\nAPI keys")
-    keys = {
-        "ANTHROPIC_API_KEY": "required by claude-* models (ACE, icl with claude)",
-        "OPENAI_API_KEY": "required by gpt-* models (icl default)",
-    }
-    for key, note in keys.items():
-        present = bool(os.environ.get(key))
-        _check(
-            f"{key} set  ({note})",
-            present,
-            fix=f"export {key}=<your-key>  or add it to .env",
-            warn=True,  # warn rather than error — depends on which models you use
-        )
+    # ── Model provider authentication ─────────────────────────────────────────
+    print("\nModel provider authentication")
+    # Anthropic auth check (direct API key or Vertex AI)
+    anthropic_key_present = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if anthropic_key_present:
+        _check("ANTHROPIC_API_KEY set", True)
+    else:
+        try:
+            from ..systems.utils.provider_adapters import (
+                is_vertex_available,
+                resolve_vertex_config,
+            )
+
+            if is_vertex_available():
+                project_id, region = resolve_vertex_config()
+                _check(
+                    f"Anthropic auth configured via Vertex AI (project: {project_id or 'default'}, region: {region})",
+                    True,
+                )
+            else:
+                _check(
+                    "Anthropic auth configured (required by claude-* models)",
+                    False,
+                    fix="export ANTHROPIC_API_KEY=<key> or configure GCP auth (gcloud auth application-default login)",
+                    warn=True,
+                )
+        except Exception:
+            _check(
+                "ANTHROPIC_API_KEY set  (required by claude-* models (ACE, icl with claude))",
+                False,
+                fix="export ANTHROPIC_API_KEY=<your-key> or configure Vertex AI",
+                warn=True,
+            )
+
+    # OpenAI auth check
+    openai_key_present = bool(os.environ.get("OPENAI_API_KEY"))
+    _check(
+        "OPENAI_API_KEY set  (required by gpt-* models (icl default))",
+        openai_key_present,
+        fix="export OPENAI_API_KEY=<your-key>  or add it to .env",
+        warn=True,
+    )
 
     # ── Optional: Docker ─────────────────────────────────────────────────────
     print("\nOptional tools")

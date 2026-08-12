@@ -189,9 +189,43 @@ def _lookup_model_rates(
     model: str, provider: Optional[str]
 ) -> Optional[dict[str, Any]]:
     """Return the litellm.model_cost entry for a model, trying common key forms."""
-    candidates = [model, model.split("/", 1)[-1]]
+    clean = (
+        model.removeprefix("vertex_ai/")
+        .removeprefix("vertex/")
+        .removeprefix("anthropic/")
+    )
+    candidates = [
+        model,
+        model.split("/", 1)[-1],
+        clean,
+        f"vertex_ai/{clean}",
+        f"anthropic/{clean}",
+    ]
+    if "@" in clean:
+        base = clean.split("@", 1)[0]
+        base_clean = base.removesuffix("-v2").removesuffix("-v1")
+        candidates.extend(
+            [
+                base,
+                base_clean,
+                f"vertex_ai/{base}",
+                f"vertex_ai/{base_clean}",
+                f"anthropic/{base}",
+                f"anthropic/{base_clean}",
+            ]
+        )
+    elif "-v2" in clean or "-v1" in clean:
+        base_clean = clean.removesuffix("-v2").removesuffix("-v1")
+        candidates.extend(
+            [
+                base_clean,
+                f"vertex_ai/{base_clean}",
+                f"anthropic/{base_clean}",
+            ]
+        )
     if provider:
         candidates.append(f"{provider}/{model}")
+        candidates.append(f"{provider}/{clean}")
     seen: set[str] = set()
     for key in candidates:
         if not key or key in seen:

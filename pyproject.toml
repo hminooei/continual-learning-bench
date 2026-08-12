@@ -5,6 +5,7 @@ description = "Benchmark framework for evaluating continual learning systems acr
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "anthropic[vertex]>=0.40.0",
     "huggingface-hub>=0.23.0",
     "litellm==1.81.6",
     "openai==2.16.0",
@@ -77,6 +78,10 @@ all = [
 
 [tool.uv]
 package = true
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
 
 [build-system]
 requires = ["setuptools>=61"]

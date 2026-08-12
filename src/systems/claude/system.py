@@ -239,10 +239,37 @@ class ClaudeCodeSystem(ContinualLearningSystem):
         other_memory_files: Optional[list[str]] = None,
         api_key: Optional[str] = None,
         reasoning_effort: Optional[str] = "low",
+        use_vertex: Optional[bool] = None,
+        vertex_project_id: Optional[str] = None,
+        vertex_region: Optional[str] = None,
     ):
         resolved_api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-        if not resolved_api_key:
-            raise ValueError("ANTHROPIC_API_KEY must be set")
+        if use_vertex is None:
+            use_vertex = os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1" or (
+                not resolved_api_key
+            )
+
+        if use_vertex:
+            from ..utils.provider_adapters import resolve_vertex_config
+
+            project_id, region = resolve_vertex_config(
+                project_id=vertex_project_id,
+                region=vertex_region,
+            )
+            self._use_vertex = True
+            self._vertex_project_id = project_id
+            self._vertex_region = region
+            self._api_key = resolved_api_key
+        else:
+            if not resolved_api_key:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY must be set when Vertex AI is not used"
+                )
+            self._use_vertex = False
+            self._vertex_project_id = None
+            self._vertex_region = None
+            self._api_key = resolved_api_key
+
         if (
             reasoning_effort is not None
             and reasoning_effort not in _REASONING_EFFORT_VALUES
@@ -265,7 +292,6 @@ class ClaudeCodeSystem(ContinualLearningSystem):
         self._max_turns = max_turns
         self._allowed_tools = allowed_tools
         self._disallowed_tools = disallowed_tools
-        self._api_key = resolved_api_key
         self._reasoning_effort = reasoning_effort
         self._memory_instruction = memory_instruction
         self._single_conversation = single_conversation
@@ -309,17 +335,28 @@ class ClaudeCodeSystem(ContinualLearningSystem):
 
     def _start_container(self) -> None:
         """Start a persistent Docker container with claude installed."""
+        env: dict[str, str] = {
+            "CLAUDE_CONFIG_DIR": _CONTAINER_CLAUDE_CONFIG,
+            "IS_SANDBOX": "1",
+            "DISABLE_AUTOUPDATER": "1",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+        if self._use_vertex:
+            env["CLAUDE_CODE_USE_VERTEX"] = "1"
+            if self._vertex_project_id:
+                env["CLOUD_ML_PROJECT_ID"] = self._vertex_project_id
+                env["ANTHROPIC_VERTEX_PROJECT_ID"] = self._vertex_project_id
+            if self._vertex_region:
+                env["ANTHROPIC_VERTEX_LOCATION"] = self._vertex_region
+                env["CLOUD_ML_REGION"] = self._vertex_region
+        else:
+            env["ANTHROPIC_API_KEY"] = self._api_key
+
         self._container_id = start_docker_container(
             name_prefix="claude_bench",
             host_workspace=self._tmp_dir,
             docker_image=self._docker_image,
-            env={
-                "ANTHROPIC_API_KEY": self._api_key,
-                "CLAUDE_CONFIG_DIR": _CONTAINER_CLAUDE_CONFIG,
-                "IS_SANDBOX": "1",
-                "DISABLE_AUTOUPDATER": "1",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            },
+            env=env,
             logger=logger,
         )
 
