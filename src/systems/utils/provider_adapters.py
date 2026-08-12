@@ -601,10 +601,21 @@ class ProviderTurnClient:
         return clean
 
     def _anthropic_payload(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        cleaned_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content")
+            cleaned_messages.append(
+                {
+                    "role": role,
+                    "content": _clean_anthropic_content(content),
+                }
+            )
+
         payload: dict[str, Any] = {
             "model": self._anthropic_model(),
             "max_tokens": self.anthropic_max_tokens,
-            "messages": messages,
+            "messages": cleaned_messages,
         }
         if self.system_prompt:
             payload["system"] = [
@@ -618,12 +629,12 @@ class ProviderTurnClient:
         # user message (messages[-1]) changes every turn; messages[-2] is the
         # last completed assistant response and is stable — marking it caches
         # everything before it on subsequent turns.
-        if len(messages) >= 2:
-            penultimate = deepcopy(messages[-2])
+        if len(cleaned_messages) >= 2:
+            penultimate = deepcopy(cleaned_messages[-2])
             content = penultimate.get("content")
             if isinstance(content, list) and content:
                 content[-1]["cache_control"] = {"type": "ephemeral"}
-                messages[-2] = penultimate  # safe: messages is already a list copy
+                cleaned_messages[-2] = penultimate
         return payload
 
     def _anthropic_request(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -655,13 +666,20 @@ class ProviderTurnClient:
 
         for attempt in range(_ANTHROPIC_MAX_RETRIES + 1):
             try:
-                if self.anthropic_stream:
+                if self.anthropic_stream is not False:
                     with client.messages.stream(**kwargs) as stream:
                         response_msg = stream.get_final_message()
                         return response_msg.model_dump()
                 else:
-                    response_msg = client.messages.create(**kwargs)
-                    return response_msg.model_dump()
+                    try:
+                        response_msg = client.messages.create(**kwargs)
+                        return response_msg.model_dump()
+                    except ValueError as stream_err:
+                        if "Streaming is required" in str(stream_err):
+                            with client.messages.stream(**kwargs) as stream:
+                                response_msg = stream.get_final_message()
+                                return response_msg.model_dump()
+                        raise
             except Exception as exc:
                 status = extract_http_status(exc)
                 if (
@@ -795,7 +813,10 @@ class ProviderTurnClient:
             if isinstance(block, dict)
         ):
             self.state.hidden_state_used = True
-        self.state.native_messages.append({"role": "assistant", "content": content})
+        cleaned_content = _clean_anthropic_content(content)
+        self.state.native_messages.append(
+            {"role": "assistant", "content": cleaned_content}
+        )
 
     def _usage_from_provider_response(
         self,
@@ -903,6 +924,50 @@ def _response_output_text(response: Any) -> str:
     if content is None:
         raise RuntimeError("Provider response did not include text output")
     return content
+
+
+def _clean_anthropic_block(block: Any) -> dict[str, Any] | None:
+    if not isinstance(block, dict):
+        return None
+    block_type = block.get("type")
+    if block_type == "text":
+        cleaned: dict[str, Any] = {"type": "text", "text": str(block.get("text", ""))}
+        if "cache_control" in block and block["cache_control"]:
+            cleaned["cache_control"] = block["cache_control"]
+        return cleaned
+    if block_type == "thinking":
+        cleaned = {"type": "thinking", "thinking": str(block.get("thinking", ""))}
+        signature = block.get("signature")
+        if signature:
+            cleaned["signature"] = str(signature)
+        return cleaned
+    if block_type == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": str(block.get("id", "")),
+            "name": str(block.get("name", "")),
+            "input": block.get("input", {}),
+        }
+    if block_type == "tool_result":
+        return {
+            "type": "tool_result",
+            "tool_use_id": str(block.get("tool_use_id", "")),
+            "content": block.get("content", ""),
+        }
+    return None
+
+
+def _clean_anthropic_content(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, list):
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        return []
+    cleaned_blocks: list[dict[str, Any]] = []
+    for item in content:
+        cleaned = _clean_anthropic_block(item)
+        if cleaned is not None:
+            cleaned_blocks.append(cleaned)
+    return cleaned_blocks
 
 
 def _anthropic_text(response: dict[str, Any]) -> str:
