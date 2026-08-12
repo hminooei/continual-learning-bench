@@ -44,6 +44,20 @@ ContinuityMode = Literal[
     "chat_completion_fallback",
 ]
 
+_VERTEX_ANTHROPIC_MODEL_ALIASES: dict[str, str] = {
+    "claude-3-5-sonnet": "claude-3-5-sonnet-v2@20241022",
+    "claude-3.5-sonnet": "claude-3-5-sonnet-v2@20241022",
+    "claude-3-5-sonnet-latest": "claude-3-5-sonnet-v2@20241022",
+    "claude-3-7-sonnet": "claude-3-7-sonnet@20250219",
+    "claude-3.7-sonnet": "claude-3-7-sonnet@20250219",
+    "claude-3-7-sonnet-latest": "claude-3-7-sonnet@20250219",
+    "claude-3-5-haiku": "claude-3-5-haiku@20241022",
+    "claude-3.5-haiku": "claude-3-5-haiku@20241022",
+    "claude-3-5-haiku-latest": "claude-3-5-haiku@20241022",
+    "claude-3-opus": "claude-3-opus@20240229",
+    "claude-3-opus-latest": "claude-3-opus@20240229",
+}
+
 
 @dataclass
 class ProviderState:
@@ -574,11 +588,17 @@ class ProviderTurnClient:
             )
 
     def _anthropic_model(self) -> str:
-        return (
+        clean = (
             self.model.removeprefix("anthropic/")
             .removeprefix("vertex_ai/")
             .removeprefix("vertex/")
         )
+        auth_provider = resolve_anthropic_auth_provider(
+            self.model, self.anthropic_auth_provider
+        )
+        if auth_provider == "vertex":
+            return _VERTEX_ANTHROPIC_MODEL_ALIASES.get(clean, clean)
+        return clean
 
     def _anthropic_payload(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         payload: dict[str, Any] = {

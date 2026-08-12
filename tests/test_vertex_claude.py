@@ -143,7 +143,7 @@ def test_provider_turn_client_vertex_request(monkeypatch):
         # Check call parameters passed to create
         mock_client.messages.create.assert_called_once()
         kwargs = mock_client.messages.create.call_args.kwargs
-        assert kwargs["model"] == "claude-3-5-sonnet"
+        assert kwargs["model"] == "claude-3-5-sonnet-v2@20241022"
         assert kwargs["max_tokens"] == client.anthropic_max_tokens
 
 
