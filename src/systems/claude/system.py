@@ -341,7 +341,11 @@ class ClaudeCodeSystem(ContinualLearningSystem):
             "DISABLE_AUTOUPDATER": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
+        extra_volumes: list[str] = []
         if self._use_vertex:
+            gcloud_dir = Path.home() / ".config" / "gcloud"
+            if gcloud_dir.is_dir():
+                extra_volumes.append(f"{gcloud_dir}:/root/.config/gcloud:ro")
             env["CLAUDE_CODE_USE_VERTEX"] = "1"
             if self._vertex_project_id:
                 env["CLOUD_ML_PROJECT_ID"] = self._vertex_project_id
@@ -357,6 +361,7 @@ class ClaudeCodeSystem(ContinualLearningSystem):
             host_workspace=self._tmp_dir,
             docker_image=self._docker_image,
             env=env,
+            extra_volumes=extra_volumes,
             logger=logger,
         )
 

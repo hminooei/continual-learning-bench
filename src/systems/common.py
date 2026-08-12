@@ -359,6 +359,7 @@ def start_docker_container(
     env: Mapping[str, str],
     logger: logging.Logger,
     container_workspace: str = CONTAINER_WORKSPACE,
+    extra_volumes: Sequence[str] = (),
 ) -> str:
     """Start a persistent Docker container for a per-run workspace."""
     cmd = [
@@ -370,6 +371,8 @@ def start_docker_container(
         "-v",
         f"{host_workspace}:{container_workspace}",
     ]
+    for vol in extra_volumes:
+        cmd.extend(["-v", vol])
     for key, value in env.items():
         cmd.extend(["-e", f"{key}={value}"])
     cmd.extend(
