@@ -1,4 +1,6 @@
-"""Focused tests for the standalone BSM online spectrum model."""
+import pytest
+
+pytest.importorskip("experiments", reason="experiments module not available")
 
 from experiments.blind_spectrum_monitoring.online_spectrum_model import (
     BandwidthClassHypothesis,

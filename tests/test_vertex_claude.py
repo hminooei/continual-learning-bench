@@ -286,3 +286,46 @@ def test_doctor_with_vertex_auth(monkeypatch, capsys):
         "Anthropic auth configured via Vertex AI (project: doc-test-project, region: global)"
         in out
     )
+
+
+def test_clean_anthropic_block_and_content():
+    from src.systems.utils.provider_adapters import (
+        _clean_anthropic_block,
+        _clean_anthropic_content,
+    )
+    from anthropic.types import TextBlock
+
+    # TextBlock object
+    sdk_block = TextBlock(text="Hello world", type="text")
+    cleaned = _clean_anthropic_block(sdk_block)
+    assert cleaned == {"type": "text", "text": "Hello world"}
+
+    # Redacted thinking
+    redacted = {"type": "redacted_thinking", "data": "abc123xyz"}
+    assert _clean_anthropic_block(redacted) == redacted
+
+    # Single dict content
+    content_dict = {"type": "text", "text": "Direct dict"}
+    assert _clean_anthropic_content(content_dict) == [
+        {"type": "text", "text": "Direct dict"}
+    ]
+
+
+def test_vertex_model_aliases():
+    from src.systems.utils.provider_adapters import (
+        _VERTEX_ANTHROPIC_MODEL_ALIASES,
+        ProviderTurnClient,
+    )
+
+    client = ProviderTurnClient(
+        model="claude-3-5-sonnet-20241022",
+        anthropic_auth_provider="vertex",
+    )
+    assert client._anthropic_model() == "claude-3-5-sonnet-v2@20241022"
+
+    client_haiku = ProviderTurnClient(
+        model="claude-3-haiku",
+        anthropic_auth_provider="vertex",
+    )
+    assert client_haiku._anthropic_model() == "claude-3-haiku@20240307"
+

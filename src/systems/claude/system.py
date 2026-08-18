@@ -108,6 +108,27 @@ def _extract_session_id(events: list[dict[str, Any]]) -> str | None:
     return session_ids[0] if session_ids else None
 
 
+def _extract_error_detail(result: subprocess.CompletedProcess[str]) -> str:
+    """Extract a concise, useful error message from Claude CLI output."""
+    stderr = result.stderr.strip()
+    if stderr:
+        return stderr
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return "No output produced"
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+            if event.get("type") in {"error", "result"} and (
+                event.get("is_error") or "error" in event or "message" in event
+            ):
+                return line
+        except Exception:
+            pass
+    return lines[-1]
+
+
+
 def _extract_assistant_text(events: list[dict[str, Any]]) -> str:
     """Concatenate text content blocks across all assistant events."""
     text_parts: list[str] = []
@@ -346,6 +367,11 @@ class ClaudeCodeSystem(ContinualLearningSystem):
             gcloud_dir = Path.home() / ".config" / "gcloud"
             if gcloud_dir.is_dir():
                 extra_volumes.append(f"{gcloud_dir}:/root/.config/gcloud:ro")
+            sa_key_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            if sa_key_path and Path(sa_key_path).is_file():
+                sa_path = Path(sa_key_path).resolve()
+                extra_volumes.append(f"{sa_path}:/root/gcp_sa_key.json:ro")
+                env["GOOGLE_APPLICATION_CREDENTIALS"] = "/root/gcp_sa_key.json"
             env["CLAUDE_CODE_USE_VERTEX"] = "1"
             if self._vertex_project_id:
                 env["CLOUD_ML_PROJECT_ID"] = self._vertex_project_id
@@ -650,7 +676,11 @@ class ClaudeCodeSystem(ContinualLearningSystem):
 
         def _attempt(mode: str) -> subprocess.CompletedProcess[str]:
             args = self._build_cli_args(mode)
-            command = " ".join([*args, "--", shlex.quote(prompt)])
+            claude_cmd = " ".join([*args, "--", shlex.quote(prompt)])
+            command = (
+                f"{claude_cmd}; _rc=$?; "
+                "chmod -R a+rX /workspace/.claude >/dev/null 2>&1 || true; exit $_rc"
+            )
             logger.info(
                 "Calling claude (mode=%s, interaction=%d, prompt=%d chars)",
                 mode,
@@ -667,7 +697,7 @@ class ClaudeCodeSystem(ContinualLearningSystem):
                 f"LLM call failed: Claude timed out after {timeout} seconds"
             ) from exc
         if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip()
+            detail = _extract_error_detail(result)
             retry_mode = "resume-sid" if self._conversation_id is not None else "fresh"
             logger.warning(
                 "Claude failed (rc=%d), retrying as %s: %s",
@@ -682,10 +712,24 @@ class ClaudeCodeSystem(ContinualLearningSystem):
                 raise RuntimeError(
                     f"LLM call failed: Claude timed out after {timeout} seconds during retry"
                 ) from exc
+            if result.returncode != 0 and retry_mode == "resume-sid":
+                detail = _extract_error_detail(result)
+                logger.warning(
+                    "Claude resume failed (rc=%d), falling back to fresh attempt: %s",
+                    result.returncode,
+                    detail[:300],
+                )
+                try:
+                    result = _attempt("fresh")
+                except subprocess.TimeoutExpired as exc:
+                    timeout = exc.timeout if exc.timeout is not None else self._timeout
+                    raise RuntimeError(
+                        f"LLM call failed: Claude timed out after {timeout} seconds during fresh retry"
+                    ) from exc
             if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip()
+                detail = _extract_error_detail(result)
                 raise RuntimeError(
-                    f"Claude exited with code {result.returncode} after retry: {detail}"
+                    f"LLM call failed: Claude exited with code {result.returncode} after retry: {detail}"
                 )
 
         events = _parse_events(result.stdout)
@@ -765,7 +809,12 @@ class ClaudeCodeSystem(ContinualLearningSystem):
                 raise RuntimeError(
                     f"LLM call failed: Claude repair returned no assistant message: {repair_exc}"
                 ) from repair_exc
-            action = _parse_action_text(repaired_text, response_schema)
+            try:
+                action = _parse_action_text(repaired_text, response_schema)
+            except Exception as repair_parse_exc:
+                raise RuntimeError(
+                    f"LLM call failed: Claude response could not be parsed into schema: {repair_parse_exc}"
+                ) from repair_parse_exc
             return action, all_events, True
 
     def _record_turn_usage(self, events: list[dict[str, Any]]) -> dict[str, int]:

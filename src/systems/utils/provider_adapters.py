@@ -48,14 +48,22 @@ _VERTEX_ANTHROPIC_MODEL_ALIASES: dict[str, str] = {
     "claude-3-5-sonnet": "claude-3-5-sonnet-v2@20241022",
     "claude-3.5-sonnet": "claude-3-5-sonnet-v2@20241022",
     "claude-3-5-sonnet-latest": "claude-3-5-sonnet-v2@20241022",
+    "claude-3-5-sonnet-20241022": "claude-3-5-sonnet-v2@20241022",
     "claude-3-7-sonnet": "claude-3-7-sonnet@20250219",
     "claude-3.7-sonnet": "claude-3-7-sonnet@20250219",
     "claude-3-7-sonnet-latest": "claude-3-7-sonnet@20250219",
+    "claude-3-7-sonnet-20250219": "claude-3-7-sonnet@20250219",
     "claude-3-5-haiku": "claude-3-5-haiku@20241022",
     "claude-3.5-haiku": "claude-3-5-haiku@20241022",
     "claude-3-5-haiku-latest": "claude-3-5-haiku@20241022",
+    "claude-3-5-haiku-20241022": "claude-3-5-haiku@20241022",
+    "claude-3-haiku": "claude-3-haiku@20240307",
+    "claude-3-haiku-20240307": "claude-3-haiku@20240307",
+    "claude-3-sonnet": "claude-3-sonnet@20240229",
+    "claude-3-sonnet-20240229": "claude-3-sonnet@20240229",
     "claude-3-opus": "claude-3-opus@20240229",
     "claude-3-opus-latest": "claude-3-opus@20240229",
+    "claude-3-opus-20240229": "claude-3-opus@20240229",
 }
 
 
@@ -674,8 +682,9 @@ class ProviderTurnClient:
                     try:
                         response_msg = client.messages.create(**kwargs)
                         return response_msg.model_dump()
-                    except ValueError as stream_err:
-                        if "Streaming is required" in str(stream_err):
+                    except Exception as stream_err:
+                        err_str = str(stream_err).lower()
+                        if "streaming" in err_str or "stream" in err_str:
                             with client.messages.stream(**kwargs) as stream:
                                 response_msg = stream.get_final_message()
                                 return response_msg.model_dump()
@@ -927,6 +936,10 @@ def _response_output_text(response: Any) -> str:
 
 
 def _clean_anthropic_block(block: Any) -> dict[str, Any] | None:
+    if hasattr(block, "model_dump"):
+        block = block.model_dump()
+    elif hasattr(block, "__dict__") and not isinstance(block, dict):
+        block = {k: v for k, v in vars(block).items() if not k.startswith("_")}
     if not isinstance(block, dict):
         return None
     block_type = block.get("type")
@@ -941,6 +954,11 @@ def _clean_anthropic_block(block: Any) -> dict[str, Any] | None:
         if signature:
             cleaned["signature"] = str(signature)
         return cleaned
+    if block_type == "redacted_thinking":
+        return {
+            "type": "redacted_thinking",
+            "data": str(block.get("data", "")),
+        }
     if block_type == "tool_use":
         return {
             "type": "tool_use",
@@ -954,13 +972,16 @@ def _clean_anthropic_block(block: Any) -> dict[str, Any] | None:
             "tool_use_id": str(block.get("tool_use_id", "")),
             "content": block.get("content", ""),
         }
-    return None
+    return dict(block) if block_type else None
 
 
 def _clean_anthropic_content(content: Any) -> list[dict[str, Any]]:
     if not isinstance(content, list):
         if isinstance(content, str):
             return [{"type": "text", "text": content}]
+        if isinstance(content, dict) or hasattr(content, "model_dump"):
+            cleaned = _clean_anthropic_block(content)
+            return [cleaned] if cleaned is not None else []
         return []
     cleaned_blocks: list[dict[str, Any]] = []
     for item in content:
